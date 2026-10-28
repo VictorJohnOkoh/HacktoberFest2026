@@ -1,0 +1,233 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Furniture Room</title>
+<style>
+  body { margin: 0; overflow: hidden; font-family: system-ui, sans-serif; }
+  #ui { position: absolute; top: 10px; left: 10px; background: rgba(255,255,255,.92); padding: 10px; border-radius: 8px; width: 300px; box-shadow: 0 2px 10px rgba(0,0,0,.15); }
+  textarea { width: 100%; height: 130px; font-family: monospace; font-size: 11px; box-sizing: border-box; }
+  button { margin-top: 6px; padding: 6px 12px; cursor: pointer; }
+  .hint { font-size: 12px; margin-top: 6px; color: #555; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="ui">
+  <b>Paste Gemma JSON</b>
+  <textarea id="json" placeholder='{"type": "...", "parts": [...]}'></textarea>
+  <button id="add">Add to room</button>
+  <div class="hint">Drag: move &middot; R: rotate 45&deg; &middot; Delete: remove &middot; Drag empty space: orbit</div>
+</div>
+ 
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+ 
+// ---------- ROOM SETTINGS (metres) ----------
+const ROOM = { width: 5, depth: 4, height: 2.6 };
+ 
+// ---------- SCENE, CAMERA, RENDERER ----------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#dfe6ee');
+ 
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(4, 4, 5);
+ 
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(devicePixelRatio);
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+ 
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.target.set(0, 0.5, 0);
+orbit.maxPolarAngle = Math.PI / 2 - 0.05; // don't go under the floor
+orbit.update();
+ 
+// ---------- LIGHTS ----------
+scene.add(new THREE.HemisphereLight(0xffffff, 0x888888, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+sun.position.set(3, 6, 4);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -5, right: 5, top: 5, bottom: -5 });
+scene.add(sun);
+ 
+// ---------- FLOOR + WALLS ----------
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(ROOM.width, ROOM.depth),
+  new THREE.MeshStandardMaterial({ color: '#c8a882' })
+);
+floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
+scene.add(floor);
+ 
+const wallMat = new THREE.MeshStandardMaterial({ color: '#f4f1ea', side: THREE.DoubleSide });
+const backWall = new THREE.Mesh(new THREE.PlaneGeometry(ROOM.width, ROOM.height), wallMat);
+backWall.position.set(0, ROOM.height / 2, -ROOM.depth / 2);
+backWall.receiveShadow = true;
+const leftWall = new THREE.Mesh(new THREE.PlaneGeometry(ROOM.depth, ROOM.height), wallMat);
+leftWall.rotation.y = Math.PI / 2;
+leftWall.position.set(-ROOM.width / 2, ROOM.height / 2, 0);
+leftWall.receiveShadow = true;
+scene.add(backWall, leftWall);
+ 
+// ---------- JSON -> 3D ----------
+const MATERIALS = {
+  wood:    { roughness: 0.7,  metalness: 0 },
+  metal:   { roughness: 0.3,  metalness: 0.9 },
+  fabric:  { roughness: 1,    metalness: 0 },
+  leather: { roughness: 0.5,  metalness: 0 },
+  plastic: { roughness: 0.4,  metalness: 0 },
+  glass:   { roughness: 0.05, metalness: 0, transparent: true, opacity: 0.4 },
+};
+const deg = THREE.MathUtils.degToRad;
+const furniture = [];
+ 
+function buildGeometry(p) {
+  const s = p.size || {};
+  if (p.shape === 'cylinder') return new THREE.CylinderGeometry(s.radius || 0.05, s.radius || 0.05, s.height || 0.1, 24);
+  if (p.shape === 'sphere')   return new THREE.SphereGeometry(s.radius || 0.05, 24, 16);
+  return new THREE.BoxGeometry(s.width || 0.1, s.height || 0.1, s.depth || 0.1);
+}
+ 
+function buildFurniture(data) {
+  const group = new THREE.Group();
+  group.name = data.type || 'furniture';
+ 
+  for (const p of data.parts || []) {
+    const mat = new THREE.MeshStandardMaterial({ color: p.color || '#999999', ...(MATERIALS[p.material] || {}) });
+    const mesh = new THREE.Mesh(buildGeometry(p), mat);
+    const pos = p.position || {}, rot = p.rotation || {};
+    mesh.position.set(pos.x || 0, pos.y || 0, pos.z || 0);
+    mesh.rotation.set(deg(rot.x || 0), deg(rot.y || 0), deg(rot.z || 0));
+    mesh.castShadow = mesh.receiveShadow = true;
+    group.add(mesh);
+  }
+ 
+  // Fix Gemma's mistakes: centre on X/Z and sit exactly on the floor
+  const box = new THREE.Box3().setFromObject(group);
+  const centre = box.getCenter(new THREE.Vector3());
+  group.children.forEach(c => {
+    c.position.x -= centre.x;
+    c.position.z -= centre.z;
+    c.position.y -= box.min.y;
+  });
+  return group;
+}
+ 
+function addFurniture(data) {
+  const obj = buildFurniture(data);
+  obj.position.set((Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 1.5);
+  scene.add(obj);
+  furniture.push(obj);
+  clampToRoom(obj);
+  select(obj);
+}
+ 
+// Keep objects inside the room
+function clampToRoom(obj) {
+  obj.updateMatrixWorld(true);
+  const b = new THREE.Box3().setFromObject(obj);
+  const hw = ROOM.width / 2, hd = ROOM.depth / 2;
+  if (b.min.x < -hw) obj.position.x += -hw - b.min.x;
+  if (b.max.x >  hw) obj.position.x -= b.max.x - hw;
+  if (b.min.z < -hd) obj.position.z += -hd - b.min.z;
+  if (b.max.z >  hd) obj.position.z -= b.max.z - hd;
+}
+ 
+// ---------- SELECT + DRAG ----------
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const hit = new THREE.Vector3();
+const offset = new THREE.Vector3();
+let selected = null, dragging = null;
+ 
+function rootOf(o) { while (o.parent && o.parent !== scene) o = o.parent; return o; }
+ 
+function select(obj) {
+  if (selected) selected.traverse(m => m.material && m.material.emissive.setHex(0x000000));
+  selected = obj;
+  if (selected) selected.traverse(m => m.material && m.material.emissive.setHex(0x333333));
+}
+ 
+function updateRay(e) {
+  mouse.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  raycaster.setFromCamera(mouse, camera);
+}
+ 
+// capture phase so this runs before OrbitControls
+window.addEventListener('pointerdown', e => {
+  if (e.target !== renderer.domElement) return;
+  updateRay(e);
+  const hits = raycaster.intersectObjects(furniture, true);
+  select(hits.length ? rootOf(hits[0].object) : null);
+  if (selected && raycaster.ray.intersectPlane(floorPlane, hit)) {
+    dragging = selected;
+    orbit.enabled = false;
+    offset.copy(dragging.position).sub(hit);
+  }
+}, true);
+ 
+window.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  updateRay(e);
+  if (raycaster.ray.intersectPlane(floorPlane, hit)) {
+    dragging.position.set(hit.x + offset.x, 0, hit.z + offset.z);
+    clampToRoom(dragging);
+  }
+});
+ 
+window.addEventListener('pointerup', () => { dragging = null; orbit.enabled = true; });
+ 
+window.addEventListener('keydown', e => {
+  if (!selected || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 'r' || e.key === 'R') { selected.rotation.y += Math.PI / 4; clampToRoom(selected); }
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    scene.remove(selected);
+    furniture.splice(furniture.indexOf(selected), 1);
+    selected = null;
+  }
+});
+ 
+// ---------- UI ----------
+document.getElementById('add').onclick = () => {
+  const raw = document.getElementById('json').value.replace(/```(json)?/g, '').replace(/[\r\n\t]+/g, ' ').trim();
+  try { addFurniture(JSON.parse(raw)); }
+  catch (err) { alert('Invalid JSON: ' + err.message); }
+};
+ 
+// ---------- START WITH THE EXAMPLE CHAIR ----------
+const exampleChair = {
+  type: 'dining chair',
+  parts: [
+    { name: 'seat', shape: 'box', size: { width: 0.45, height: 0.05, depth: 0.45 }, position: { x: 0, y: 0.45, z: 0 }, color: '#8B5A2B', material: 'wood' },
+    { name: 'leg fl', shape: 'box', size: { width: 0.04, height: 0.425, depth: 0.04 }, position: { x: -0.2, y: 0.2125, z: 0.2 }, color: '#6B4423', material: 'wood' },
+    { name: 'leg fr', shape: 'box', size: { width: 0.04, height: 0.425, depth: 0.04 }, position: { x: 0.2, y: 0.2125, z: 0.2 }, color: '#6B4423', material: 'wood' },
+    { name: 'leg bl', shape: 'box', size: { width: 0.04, height: 0.425, depth: 0.04 }, position: { x: -0.2, y: 0.2125, z: -0.2 }, color: '#6B4423', material: 'wood' },
+    { name: 'leg br', shape: 'box', size: { width: 0.04, height: 0.425, depth: 0.04 }, position: { x: 0.2, y: 0.2125, z: -0.2 }, color: '#6B4423', material: 'wood' },
+    { name: 'backrest', shape: 'box', size: { width: 0.45, height: 0.4, depth: 0.04 }, position: { x: 0, y: 0.675, z: -0.205 }, color: '#8B5A2B', material: 'wood' },
+  ],
+};
+addFurniture(exampleChair);
+select(null);
+ 
+// ---------- RESIZE + LOOP ----------
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+ 
+renderer.setAnimationLoop(() => renderer.render(scene, camera));
+</script>
+</body>
+</html>
